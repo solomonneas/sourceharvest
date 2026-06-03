@@ -43,11 +43,44 @@ sourceharvest markdown ./notes \
   --out -
 ```
 
+Export other local source shapes:
+
+```bash
+sourceharvest files ./notes \
+  --source notes \
+  --collection notes:files \
+  --glob "*.md,*.txt" \
+  --out -
+
+sourceharvest html ./site-export \
+  --source docs \
+  --collection docs:html \
+  --out -
+
+sourceharvest gitlog . \
+  --source gitlog \
+  --collection repo:sourceharvest \
+  --out -
+
+sourceharvest json export.json \
+  --source export \
+  --collection export:records \
+  --records-path records \
+  --out -
+```
+
 Pipe into Logspine:
 
 ```bash
 sourceharvest jsonl export.jsonl --source notes --collection notes:local --out - | spine import adapter -
 sourceharvest markdown ./notes --source notes --collection notes:local --out - | spine import adapter -
+```
+
+Or let Logspine run SourceHarvest when `sourceharvest` is installed on `PATH`:
+
+```bash
+spine import sourceharvest markdown ./notes --source notes --collection notes:local --json
+spine import sourceharvest gitlog . --source gitlog --collection repo:sourceharvest --json
 ```
 
 ## Boundary

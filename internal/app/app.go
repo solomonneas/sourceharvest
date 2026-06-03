@@ -8,9 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +21,7 @@ import (
 	"github.com/solomonneas/sourceharvest/internal/adapter"
 )
 
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
@@ -41,6 +44,30 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "files":
+		if err := runFiles(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
+		return 0
+	case "html":
+		if err := runHTML(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
+		return 0
+	case "gitlog":
+		if err := runGitLog(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
+		return 0
+	case "json":
+		if err := runJSON(args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return 1
+		}
+		return 0
 	default:
 		fmt.Fprintln(stderr, "error: unknown command", args[0])
 		return 1
@@ -53,6 +80,10 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  sourceharvest jsonl <path-or-dir> --source KIND --collection ID --out <file|-> [--collection-kind KIND] [--limit N] [--json]")
 	fmt.Fprintln(w, "  sourceharvest markdown <path-or-dir> --source KIND --collection ID --out <file|-> [--collection-kind KIND] [--limit N] [--json]")
+	fmt.Fprintln(w, "  sourceharvest files <path-or-dir> --source KIND --collection ID --out <file|-> [--glob PATTERNS] [--limit N] [--json]")
+	fmt.Fprintln(w, "  sourceharvest html <path-or-dir> --source KIND --collection ID --out <file|-> [--limit N] [--json]")
+	fmt.Fprintln(w, "  sourceharvest gitlog <repo> --source KIND --collection ID --out <file|-> [--limit N] [--json]")
+	fmt.Fprintln(w, "  sourceharvest json <file> --source KIND --collection ID --records-path PATH --out <file|-> [--limit N] [--json]")
 	fmt.Fprintln(w, "  sourceharvest version")
 }
 
@@ -103,6 +134,151 @@ func runMarkdown(args []string, stdout, stderr io.Writer) error {
 	if *jsonSummary {
 		target := stdout
 		if *outPath == "-" {
+			target = stderr
+		}
+		return writeJSON(target, result)
+	}
+	return nil
+}
+
+func runFiles(args []string, stdout, stderr io.Writer) error {
+	opts, err := parseCommonExport("files", args, stderr, "files")
+	if err != nil {
+		return err
+	}
+	globs := opts.FlagSet.String("glob", "*.txt,*.md,*.markdown", "comma-separated filename globs")
+	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+		return err
+	}
+	if err := opts.Validate("sourceharvest files <path-or-dir> --source KIND --collection ID --out <file|->"); err != nil {
+		return err
+	}
+	return withOutput(opts.OutPath, stdout, stderr, opts.JSONSummary, func(w io.Writer) (Summary, error) {
+		return exportFiles(opts.Path, opts.SourceKind, opts.CollectionID, opts.CollectionKind, *globs, opts.Limit, w)
+	})
+}
+
+func runHTML(args []string, stdout, stderr io.Writer) error {
+	opts, err := parseCommonExport("html", args, stderr, "html_pages")
+	if err != nil {
+		return err
+	}
+	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+		return err
+	}
+	if err := opts.Validate("sourceharvest html <path-or-dir> --source KIND --collection ID --out <file|->"); err != nil {
+		return err
+	}
+	return withOutput(opts.OutPath, stdout, stderr, opts.JSONSummary, func(w io.Writer) (Summary, error) {
+		return exportHTML(opts.Path, opts.SourceKind, opts.CollectionID, opts.CollectionKind, opts.Limit, w)
+	})
+}
+
+func runGitLog(args []string, stdout, stderr io.Writer) error {
+	opts, err := parseCommonExport("gitlog", args, stderr, "git_repository")
+	if err != nil {
+		return err
+	}
+	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+		return err
+	}
+	if err := opts.Validate("sourceharvest gitlog <repo> --source KIND --collection ID --out <file|->"); err != nil {
+		return err
+	}
+	return withOutput(opts.OutPath, stdout, stderr, opts.JSONSummary, func(w io.Writer) (Summary, error) {
+		return exportGitLog(opts.Path, opts.SourceKind, opts.CollectionID, opts.CollectionKind, opts.Limit, w)
+	})
+}
+
+func runJSON(args []string, stdout, stderr io.Writer) error {
+	opts, err := parseCommonExport("json", args, stderr, "source_collection")
+	if err != nil {
+		return err
+	}
+	recordsPath := opts.FlagSet.String("records-path", "", "dot path to an array of records")
+	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+		return err
+	}
+	if err := opts.Validate("sourceharvest json <file> --source KIND --collection ID --records-path PATH --out <file|->"); err != nil {
+		return err
+	}
+	return withOutput(opts.OutPath, stdout, stderr, opts.JSONSummary, func(w io.Writer) (Summary, error) {
+		return exportJSON(opts.Path, opts.SourceKind, opts.CollectionID, opts.CollectionKind, *recordsPath, opts.Limit, w)
+	})
+}
+
+type commonExportOptions struct {
+	Path           string
+	FlagArgs       []string
+	FlagSet        *flag.FlagSet
+	SourceKind     string
+	CollectionID   string
+	CollectionKind string
+	OutPath        string
+	Limit          int
+	JSONSummary    bool
+}
+
+func parseCommonExport(name string, args []string, stderr io.Writer, defaultCollectionKind string) (commonExportOptions, error) {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	sourceKind := fs.String("source", "", "source kind")
+	collectionID := fs.String("collection", "", "collection external ID")
+	collectionKind := fs.String("collection-kind", defaultCollectionKind, "collection kind")
+	outPath := fs.String("out", "-", "output file or - for stdout")
+	limit := fs.Int("limit", 0, "maximum records to emit")
+	jsonSummary := fs.Bool("json", false, "write summary JSON after export")
+	path, flagArgs, err := splitPathAndFlags(args)
+	if err != nil {
+		return commonExportOptions{}, err
+	}
+	return commonExportOptions{Path: path, FlagArgs: flagArgs, FlagSet: fs, SourceKind: *sourceKind, CollectionID: *collectionID, CollectionKind: *collectionKind, OutPath: *outPath, Limit: *limit, JSONSummary: *jsonSummary}, nil
+}
+
+func (o *commonExportOptions) Validate(usage string) error {
+	o.SourceKind = strings.TrimSpace(o.FlagSet.Lookup("source").Value.String())
+	o.CollectionID = strings.TrimSpace(o.FlagSet.Lookup("collection").Value.String())
+	o.CollectionKind = strings.TrimSpace(o.FlagSet.Lookup("collection-kind").Value.String())
+	o.OutPath = o.FlagSet.Lookup("out").Value.String()
+	o.JSONSummary = o.FlagSet.Lookup("json").Value.String() == "true"
+	if _, err := fmt.Sscan(o.FlagSet.Lookup("limit").Value.String(), &o.Limit); err != nil {
+		o.Limit = 0
+	}
+	if o.Path == "" || len(o.FlagSet.Args()) != 0 {
+		return errors.New("usage: " + usage)
+	}
+	if o.SourceKind == "" || o.CollectionID == "" {
+		return errors.New("--source and --collection are required")
+	}
+	return nil
+}
+
+func withOutput(outPath string, stdout, stderr io.Writer, jsonSummary bool, fn func(io.Writer) (Summary, error)) error {
+	var out io.Writer = stdout
+	var file *os.File
+	if outPath != "-" {
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil && filepath.Dir(outPath) != "." {
+			return err
+		}
+		f, err := os.Create(outPath)
+		if err != nil {
+			return err
+		}
+		file = f
+		out = f
+	}
+	result, err := fn(out)
+	if file != nil {
+		if closeErr := file.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if jsonSummary {
+		target := stdout
+		if outPath == "-" {
 			target = stderr
 		}
 		return writeJSON(target, result)
@@ -167,7 +343,7 @@ func runJSONL(args []string, stdout, stderr io.Writer) error {
 func splitPathAndFlags(args []string) (string, []string, error) {
 	var path string
 	var flags []string
-	valueFlags := map[string]bool{"-source": true, "--source": true, "-collection": true, "--collection": true, "-collection-kind": true, "--collection-kind": true, "-out": true, "--out": true, "-limit": true, "--limit": true}
+	valueFlags := map[string]bool{"-source": true, "--source": true, "-collection": true, "--collection": true, "-collection-kind": true, "--collection-kind": true, "-out": true, "--out": true, "-limit": true, "--limit": true, "-glob": true, "--glob": true, "-records-path": true, "--records-path": true}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
@@ -277,6 +453,212 @@ func exportMarkdown(root, sourceKind, collectionID, collectionKind string, limit
 		summary.Records++
 	}
 	return summary, nil
+}
+
+func exportFiles(root, sourceKind, collectionID, collectionKind, globs string, limit int, w io.Writer) (Summary, error) {
+	files, err := listFiles(root, splitCSV(globs), false)
+	if err != nil {
+		return Summary{}, err
+	}
+	return exportTextFiles(root, files, sourceKind, collectionID, collectionKind, "file", "text/plain", limit, w, func(path, text string) string {
+		return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	})
+}
+
+func exportHTML(root, sourceKind, collectionID, collectionKind string, limit int, w io.Writer) (Summary, error) {
+	files, err := listFiles(root, []string{"*.html", "*.htm"}, false)
+	if err != nil {
+		return Summary{}, err
+	}
+	return exportTextFiles(root, files, sourceKind, collectionID, collectionKind, "page", "text/html", limit, w, func(path, text string) string {
+		title := firstHTMLTitle(text)
+		if title == "" {
+			title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		}
+		return title
+	})
+}
+
+func exportTextFiles(root string, files []string, sourceKind, collectionID, collectionKind, itemKind, mimeType string, limit int, w io.Writer, titleFn func(string, string) string) (Summary, error) {
+	summary := Summary{Source: sourceKind, Path: root, Files: len(files), Warnings: []string{}, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	for _, file := range files {
+		if limit > 0 && summary.Records >= limit {
+			break
+		}
+		b, err := os.ReadFile(file)
+		if err != nil {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: %s", file, err))
+			continue
+		}
+		text := strings.TrimSpace(string(b))
+		if mimeType == "text/html" {
+			text = htmlToText(text)
+		}
+		if text == "" {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: empty text", file))
+			continue
+		}
+		info, err := os.Stat(file)
+		if err != nil {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: %s", file, err))
+			continue
+		}
+		hash := hashBytes(b)
+		title := titleFn(file, string(b))
+		rec := fileRecord(file, text, title, hash, info.ModTime().UTC().Format(time.RFC3339Nano), sourceKind, collectionID, collectionKind, itemKind, mimeType)
+		if err := writeRecord(w, rec); err != nil {
+			return summary, err
+		}
+		summary.Records++
+	}
+	return summary, nil
+}
+
+func exportGitLog(repo, sourceKind, collectionID, collectionKind string, limit int, w io.Writer) (Summary, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	cmd := exec.Command("git", "-C", repo, "log", "--date=iso-strict", "--format=%H%x1f%aI%x1f%an%x1f%s", "-n", fmt.Sprint(limit))
+	b, err := cmd.Output()
+	if err != nil {
+		return Summary{}, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	summary := Summary{Source: sourceKind, Path: repo, Files: 1, Warnings: []string{}, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\x1f", 4)
+		if len(parts) != 4 {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("git log line %d: malformed", i+1))
+			continue
+		}
+		rec := gitLogRecord(repo, parts[0], parts[1], parts[2], parts[3], sourceKind, collectionID, collectionKind, int64(i+1))
+		if err := writeRecord(w, rec); err != nil {
+			return summary, err
+		}
+		summary.Records++
+	}
+	return summary, nil
+}
+
+func exportJSON(path, sourceKind, collectionID, collectionKind, recordsPath string, limit int, w io.Writer) (Summary, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Summary{}, err
+	}
+	var root any
+	if err := json.Unmarshal(b, &root); err != nil {
+		return Summary{}, err
+	}
+	records, err := selectJSONRecords(root, recordsPath)
+	if err != nil {
+		return Summary{}, err
+	}
+	summary := Summary{Source: sourceKind, Path: path, Files: 1, Warnings: []string{}, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	for i, item := range records {
+		if limit > 0 && summary.Records >= limit {
+			break
+		}
+		obj, ok := item.(map[string]any)
+		if !ok {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s:%d: record is not an object", path, i+1))
+			continue
+		}
+		line, _ := json.Marshal(obj)
+		rec, warning := normalize(path, int64(i+1), line, obj, sourceKind, collectionID, collectionKind)
+		if warning != "" {
+			summary.Warnings = append(summary.Warnings, warning)
+			continue
+		}
+		if err := writeRecord(w, rec); err != nil {
+			return summary, err
+		}
+		summary.Records++
+	}
+	return summary, nil
+}
+
+func fileRecord(path, text, title, hash, createdAt, sourceKind, collectionID, collectionKind, itemKind, mimeType string) adapter.Record {
+	externalID := sourceKind + ":" + itemKind + ":" + stableID(path, hash)
+	return adapter.Record{
+		Schema: adapter.SchemaV1,
+		Source: adapter.Source{Kind: sourceKind, Name: sourceKind},
+		Collection: adapter.Collection{
+			ExternalID: collectionID,
+			Kind:       collectionKind,
+			Name:       collectionID,
+			Metadata:   metadata(map[string]any{"source": sourceKind}),
+		},
+		Item: adapter.Item{
+			ExternalID: externalID,
+			Kind:       itemKind,
+			CreatedAt:  createdAt,
+			Text:       text,
+			Tags:       []string{sourceKind, itemKind},
+			Metadata:   metadata(map[string]any{"source": sourceKind, "file_path": path, "title": title}),
+		},
+		Actor: &adapter.Actor{
+			ExternalID: sourceKind + ":system:file",
+			Type:       "system",
+			Name:       "File",
+		},
+		Artifacts: []adapter.Artifact{{
+			ExternalID: stableID(externalID, path),
+			Kind:       "file",
+			Path:       path,
+			MimeType:   mimeType,
+			Hash:       "sha256:" + hash,
+			Metadata:   metadata(map[string]any{"title": title}),
+		}},
+		Links:     []adapter.Link{},
+		Relations: []adapter.Relation{},
+		Raw:       adapter.RawRef{Format: mimeType, Hash: "sha256:" + hash, Path: path},
+	}
+}
+
+func gitLogRecord(repo, commit, createdAt, author, subject, sourceKind, collectionID, collectionKind string, ordinal int64) adapter.Record {
+	line := []byte(commit + "\x1f" + createdAt + "\x1f" + author + "\x1f" + subject)
+	externalID := sourceKind + ":commit:" + commit
+	ordinalCopy := ordinal
+	return adapter.Record{
+		Schema: adapter.SchemaV1,
+		Source: adapter.Source{Kind: sourceKind, Name: sourceKind},
+		Collection: adapter.Collection{
+			ExternalID: collectionID,
+			Kind:       collectionKind,
+			Name:       collectionID,
+			Metadata:   metadata(map[string]any{"repo": repo}),
+		},
+		Item: adapter.Item{
+			ExternalID: externalID,
+			Kind:       "event",
+			CreatedAt:  createdAt,
+			Text:       subject,
+			Tags:       []string{sourceKind, "gitlog"},
+			Metadata:   metadata(map[string]any{"repo": repo, "commit": commit}),
+		},
+		Actor: &adapter.Actor{
+			ExternalID: sourceKind + ":author:" + stableID(author),
+			Type:       "human",
+			Name:       author,
+		},
+		Artifacts: []adapter.Artifact{{
+			ExternalID: stableID(externalID, repo),
+			Kind:       "repo",
+			Path:       repo,
+			Metadata:   metadata(map[string]any{"commit": commit}),
+		}},
+		Links:     []adapter.Link{},
+		Relations: []adapter.Relation{},
+		Raw: adapter.RawRef{
+			Format:  "text/git-log",
+			Hash:    "sha256:" + hashBytes(line),
+			Path:    repo,
+			Ordinal: &ordinalCopy,
+		},
+	}
 }
 
 func markdownRecord(path, text, hash, createdAt, sourceKind, collectionID, collectionKind string) adapter.Record {
@@ -472,6 +854,116 @@ func listMarkdown(root string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func listFiles(root string, globs []string, includeHidden bool) ([]string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	if !info.IsDir() {
+		if matchesAny(filepath.Base(root), globs) {
+			return []string{root}, nil
+		}
+		return nil, fmt.Errorf("%s does not match requested globs", root)
+	}
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		lower := strings.ToLower(name)
+		if d.IsDir() {
+			if lower == ".git" || lower == "node_modules" || lower == "backup" || lower == "backups" || lower == "deleted" {
+				return filepath.SkipDir
+			}
+			if !includeHidden && strings.HasPrefix(name, ".") && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !includeHidden && strings.HasPrefix(name, ".") {
+			return nil
+		}
+		if matchesAny(name, globs) && !strings.Contains(lower, ".bak") && !strings.Contains(lower, "backup") {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func splitCSV(raw string) []string {
+	out := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"*"}
+	}
+	return out
+}
+
+func matchesAny(name string, globs []string) bool {
+	for _, glob := range globs {
+		if ok, _ := filepath.Match(glob, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+var (
+	scriptStyleRe = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
+	tagRe         = regexp.MustCompile(`(?s)<[^>]+>`)
+	spaceRe       = regexp.MustCompile(`[ \t\r\n]+`)
+	titleRe       = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+)
+
+func htmlToText(raw string) string {
+	raw = scriptStyleRe.ReplaceAllString(raw, " ")
+	raw = tagRe.ReplaceAllString(raw, " ")
+	raw = stdhtml.UnescapeString(raw)
+	return strings.TrimSpace(spaceRe.ReplaceAllString(raw, " "))
+}
+
+func firstHTMLTitle(raw string) string {
+	match := titleRe.FindStringSubmatch(raw)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(stdhtml.UnescapeString(tagRe.ReplaceAllString(match[1], " ")))
+}
+
+func selectJSONRecords(root any, recordsPath string) ([]any, error) {
+	cur := root
+	if strings.TrimSpace(recordsPath) != "" {
+		for _, part := range strings.Split(recordsPath, ".") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("records path %q does not resolve through an object", recordsPath)
+			}
+			cur = m[part]
+		}
+	}
+	if arr, ok := cur.([]any); ok {
+		return arr, nil
+	}
+	if m, ok := cur.(map[string]any); ok && recordsPath == "" {
+		return []any{m}, nil
+	}
+	return nil, fmt.Errorf("records path %q did not resolve to an array", recordsPath)
 }
 
 func scanFile(path string, each func(ordinal int64, line []byte, obj map[string]any) error) error {
