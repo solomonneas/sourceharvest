@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">How SourceHarvest works</title>
+  <desc id="desc">Flowchart showing local source exports entering SourceHarvest, being normalized, then emitted as Logspine adapter JSONL.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; letter-spacing: 0; }
+      .title { font-weight: 700; font-size: 28px; fill: #0f172a; }
+      .label { font-weight: 700; font-size: 16px; fill: #0f172a; }
+      .small { font-weight: 400; font-size: 13px; fill: #334155; }
+      .box { stroke: #334155; stroke-width: 2; rx: 10; }
+      .source { fill: #e0f2fe; }
+      .process { fill: #fef3c7; }
+      .safe { fill: #dcfce7; }
+      .output { fill: #ede9fe; }
+      .line { stroke: #334155; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; stroke-dasharray: 6 6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" fill="#ffffff"/>
+  <text x="48" y="52" class="title">How SourceHarvest Works</text>
+
+  <rect x="48" y="104" width="230" height="292" class="box source"/>
+  <text x="163" y="136" text-anchor="middle" class="label">Local Inputs</text>
+  <text x="72" y="178" class="small">Generic JSONL records</text>
+  <text x="72" y="210" class="small">Nested JSON exports</text>
+  <text x="72" y="242" class="small">Markdown notes</text>
+  <text x="72" y="274" class="small">Text and log files</text>
+  <text x="72" y="306" class="small">HTML exports</text>
+  <text x="72" y="338" class="small">Local git history</text>
+  <text x="72" y="370" class="small">Future crawler exports</text>
+
+  <rect x="348" y="112" width="190" height="82" class="box process"/>
+  <text x="443" y="146" text-anchor="middle" class="label">CLI Command</text>
+  <text x="443" y="168" text-anchor="middle" class="small">jsonl, json, markdown,</text>
+  <text x="443" y="188" text-anchor="middle" class="small">files, html, gitlog</text>
+
+  <rect x="348" y="246" width="190" height="92" class="box process"/>
+  <text x="443" y="280" text-anchor="middle" class="label">Normalize</text>
+  <text x="443" y="302" text-anchor="middle" class="small">stable IDs, actors,</text>
+  <text x="443" y="322" text-anchor="middle" class="small">collections, raw refs</text>
+
+  <rect x="612" y="104" width="216" height="112" class="box safe"/>
+  <text x="720" y="138" text-anchor="middle" class="label">Local-Only Boundary</text>
+  <text x="720" y="162" text-anchor="middle" class="small">No network calls.</text>
+  <text x="720" y="182" text-anchor="middle" class="small">No archive, search, GUI,</text>
+  <text x="720" y="202" text-anchor="middle" class="small">server, or SQLite behavior.</text>
+
+  <rect x="612" y="272" width="216" height="96" class="box output"/>
+  <text x="720" y="306" text-anchor="middle" class="label">Adapter JSONL</text>
+  <text x="720" y="330" text-anchor="middle" class="small">logspine.adapter.v1</text>
+  <text x="720" y="350" text-anchor="middle" class="small">one JSON object per line</text>
+
+  <rect x="894" y="184" width="178" height="108" class="box output"/>
+  <text x="983" y="220" text-anchor="middle" class="label">Output</text>
+  <text x="983" y="244" text-anchor="middle" class="small">stdout pipe</text>
+  <text x="983" y="264" text-anchor="middle" class="small">or private file</text>
+  <text x="983" y="284" text-anchor="middle" class="small">plus summary JSON</text>
+
+  <rect x="380" y="424" width="420" height="82" class="box safe"/>
+  <text x="590" y="456" text-anchor="middle" class="label">Evidence Boundary</text>
+  <text x="590" y="480" text-anchor="middle" class="small">Harvested text is untrusted evidence.</text>
+  <text x="590" y="500" text-anchor="middle" class="small">Durable archive behavior belongs in Logspine.</text>
+
+  <path d="M 278 250 L 348 153" class="line"/>
+  <path d="M 443 194 L 443 246" class="line"/>
+  <path d="M 538 292 L 612 320" class="line"/>
+  <path d="M 828 320 L 894 238" class="line"/>
+  <path d="M 538 292 L 590 424" class="dash"/>
+  <path d="M 538 154 L 612 160" class="dash"/>
+</svg>

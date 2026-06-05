@@ -109,36 +109,9 @@ func runMarkdown(args []string, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(*sourceKind) == "" || strings.TrimSpace(*collectionID) == "" {
 		return errors.New("--source and --collection are required")
 	}
-	var out io.Writer = stdout
-	var file *os.File
-	if *outPath != "-" {
-		if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil && filepath.Dir(*outPath) != "." {
-			return err
-		}
-		f, err := os.Create(*outPath)
-		if err != nil {
-			return err
-		}
-		file = f
-		out = f
-	}
-	result, err := exportMarkdown(path, *sourceKind, *collectionID, *collectionKind, *limit, out)
-	if file != nil {
-		if closeErr := file.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
-	if err != nil {
-		return err
-	}
-	if *jsonSummary {
-		target := stdout
-		if *outPath == "-" {
-			target = stderr
-		}
-		return writeJSON(target, result)
-	}
-	return nil
+	return withOutput(*outPath, stdout, stderr, *jsonSummary, func(w io.Writer) (Summary, error) {
+		return exportMarkdown(path, *sourceKind, *collectionID, *collectionKind, *limit, w)
+	})
 }
 
 func runFiles(args []string, stdout, stderr io.Writer) error {
@@ -255,22 +228,23 @@ func (o *commonExportOptions) Validate(usage string) error {
 
 func withOutput(outPath string, stdout, stderr io.Writer, jsonSummary bool, fn func(io.Writer) (Summary, error)) error {
 	var out io.Writer = stdout
-	var file *os.File
+	var file *atomicOutput
 	if outPath != "-" {
-		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil && filepath.Dir(outPath) != "." {
-			return err
-		}
-		f, err := os.Create(outPath)
+		f, err := createAtomicOutput(outPath)
 		if err != nil {
 			return err
 		}
 		file = f
-		out = f
+		out = f.File
 	}
 	result, err := fn(out)
 	if file != nil {
-		if closeErr := file.Close(); closeErr != nil && err == nil {
-			err = closeErr
+		if err != nil {
+			if abortErr := file.Abort(); abortErr != nil {
+				return abortErr
+			}
+		} else if commitErr := file.Commit(); commitErr != nil {
+			err = commitErr
 		}
 	}
 	if err != nil {
@@ -308,36 +282,66 @@ func runJSONL(args []string, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(*sourceKind) == "" || strings.TrimSpace(*collectionID) == "" {
 		return errors.New("--source and --collection are required")
 	}
-	var out io.Writer = stdout
-	var file *os.File
-	if *outPath != "-" {
-		if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil && filepath.Dir(*outPath) != "." {
-			return err
+	return withOutput(*outPath, stdout, stderr, *jsonSummary, func(w io.Writer) (Summary, error) {
+		return exportJSONL(path, *sourceKind, *collectionID, *collectionKind, *limit, w)
+	})
+}
+
+type atomicOutput struct {
+	Path string
+	Temp string
+	File *os.File
+}
+
+func createAtomicOutput(path string) (*atomicOutput, error) {
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
 		}
-		f, err := os.Create(*outPath)
-		if err != nil {
-			return err
-		}
-		file = f
-		out = f
 	}
-	result, err := exportJSONL(path, *sourceKind, *collectionID, *collectionKind, *limit, out)
-	if file != nil {
-		if closeErr := file.Close(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, err
+	}
+	return &atomicOutput{Path: path, Temp: file.Name(), File: file}, nil
+}
+
+func (o *atomicOutput) Commit() error {
+	if o == nil || o.File == nil {
+		return nil
+	}
+	if err := o.File.Close(); err != nil {
+		_ = os.Remove(o.Temp)
+		o.File = nil
 		return err
 	}
-	if *jsonSummary {
-		target := stdout
-		if *outPath == "-" {
-			target = stderr
-		}
-		return writeJSON(target, result)
+	o.File = nil
+	if err := os.Rename(o.Temp, o.Path); err != nil {
+		_ = os.Remove(o.Temp)
+		return err
 	}
 	return nil
+}
+
+func (o *atomicOutput) Abort() error {
+	if o == nil {
+		return nil
+	}
+	var err error
+	if o.File != nil {
+		err = o.File.Close()
+		o.File = nil
+	}
+	if removeErr := os.Remove(o.Temp); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+		err = removeErr
+	}
+	return err
 }
 
 func splitPathAndFlags(args []string) (string, []string, error) {

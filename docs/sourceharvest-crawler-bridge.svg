@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">SourceHarvest crawler bridge</title>
+  <desc id="desc">Flowchart showing crawler archives and local exports flowing through SourceHarvest into Logspine.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; letter-spacing: 0; }
+      .title { font-weight: 700; font-size: 28px; fill: #0f172a; }
+      .label { font-weight: 700; font-size: 16px; fill: #0f172a; }
+      .small { font-weight: 400; font-size: 13px; fill: #334155; }
+      .box { stroke: #334155; stroke-width: 2; rx: 10; }
+      .crawler { fill: #e0f2fe; }
+      .bridge { fill: #fef3c7; }
+      .agent { fill: #dcfce7; }
+      .logspine { fill: #ede9fe; }
+      .line { stroke: #334155; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; stroke-dasharray: 6 6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" fill="#ffffff"/>
+  <text x="48" y="52" class="title">SourceHarvest in the Local Evidence Stack</text>
+
+  <rect x="48" y="102" width="236" height="258" class="box crawler"/>
+  <text x="166" y="136" text-anchor="middle" class="label">Crawler Archives</text>
+  <text x="74" y="178" class="small">discrawl: Discord</text>
+  <text x="74" y="210" class="small">gitcrawl: GitHub</text>
+  <text x="74" y="242" class="small">graincrawl: Granola</text>
+  <text x="74" y="274" class="small">notcrawl: Notion</text>
+  <text x="74" y="306" class="small">slacrawl: Slack</text>
+  <text x="74" y="338" class="small">telecrawl: Telegram</text>
+
+  <rect x="48" y="406" width="236" height="82" class="box agent"/>
+  <text x="166" y="438" text-anchor="middle" class="label">AgentTrail</text>
+  <text x="166" y="462" text-anchor="middle" class="small">agent-session logs only</text>
+
+  <rect x="368" y="112" width="230" height="116" class="box bridge"/>
+  <text x="483" y="146" text-anchor="middle" class="label">Local Export</text>
+  <text x="483" y="170" text-anchor="middle" class="small">DB, snapshot, JSON,</text>
+  <text x="483" y="190" text-anchor="middle" class="small">JSONL, Markdown, HTML</text>
+  <text x="483" y="210" text-anchor="middle" class="small">depending on source</text>
+
+  <rect x="368" y="284" width="230" height="106" class="box bridge"/>
+  <text x="483" y="318" text-anchor="middle" class="label">SourceHarvest</text>
+  <text x="483" y="342" text-anchor="middle" class="small">source-system adapters</text>
+  <text x="483" y="362" text-anchor="middle" class="small">and generic local readers</text>
+
+  <rect x="692" y="190" width="196" height="108" class="box logspine"/>
+  <text x="790" y="226" text-anchor="middle" class="label">Adapter Contract</text>
+  <text x="790" y="250" text-anchor="middle" class="small">logspine.adapter.v1</text>
+  <text x="790" y="270" text-anchor="middle" class="small">stable local evidence</text>
+
+  <rect x="956" y="142" width="128" height="204" class="box logspine"/>
+  <text x="1020" y="178" text-anchor="middle" class="label">Logspine</text>
+  <text x="1020" y="210" text-anchor="middle" class="small">import</text>
+  <text x="1020" y="242" text-anchor="middle" class="small">dedupe</text>
+  <text x="1020" y="274" text-anchor="middle" class="small">FTS</text>
+  <text x="1020" y="306" text-anchor="middle" class="small">evidence</text>
+
+  <path d="M 284 230 L 368 170" class="line"/>
+  <path d="M 483 228 L 483 284" class="line"/>
+  <path d="M 598 337 L 692 244" class="line"/>
+  <path d="M 888 244 L 956 244" class="line"/>
+  <path d="M 284 447 L 692 270" class="dash"/>
+</svg>

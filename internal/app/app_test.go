@@ -132,6 +132,61 @@ func TestGitLogExporter(t *testing.T) {
 	}
 }
 
+func TestExportFilesArePrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested")
+	outPath := filepath.Join(dir, "notes.adapter.jsonl")
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"markdown", fixturePath("notes"), "--source", "notes", "--collection", "notes:local", "--out", outPath, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr.String())
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("output mode = %o, want 0600", got)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("output dir mode = %o, want 0700", got)
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatalf("expected summary JSON on stdout")
+	}
+}
+
+func TestFailedExportDoesNotReplaceExistingOutput(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "records.adapter.jsonl")
+	original := []byte("keep existing adapter export\n")
+	if err := os.WriteFile(outPath, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"json", fixturePath("records.json"), "--source", "json", "--collection", "json:local", "--records-path", "missing", "--out", outPath}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected failure")
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("existing output was replaced: %q", got)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".records.adapter.jsonl.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary outputs left behind: %v", matches)
+	}
+}
+
 func TestVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"version"}, &stdout, &stderr)
