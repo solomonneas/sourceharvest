@@ -40,6 +40,34 @@ func TestJSONLExportsAdapterRecords(t *testing.T) {
 	}
 }
 
+func TestJSONLWarnsOnInvalidLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.jsonl")
+	lines := strings.Join([]string{
+		`{"id":"one","text":"first record"}`,
+		`{"id":`,
+		`{"id":"two","text":"second record"}`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"jsonl", path, "--source", "demo", "--collection", "demo:collection", "--out", "-", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d stderr=%s", code, stderr.String())
+	}
+	if got := strings.Split(strings.TrimSpace(stdout.String()), "\n"); len(got) != 2 {
+		t.Fatalf("records = %d, want 2: %s", len(got), stdout.String())
+	}
+	var summary Summary
+	if err := json.Unmarshal(stderr.Bytes(), &summary); err != nil {
+		t.Fatalf("invalid summary: %v\n%s", err, stderr.String())
+	}
+	if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0], "invalid JSON") {
+		t.Fatalf("missing invalid JSON warning: %#v", summary.Warnings)
+	}
+}
+
 func TestMarkdownExportsAdapterRecords(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"markdown", fixturePath("notes"), "--source", "notes", "--collection", "notes:local", "--out", "-", "--json"}, &stdout, &stderr)

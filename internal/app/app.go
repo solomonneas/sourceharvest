@@ -411,6 +411,8 @@ func exportJSONL(root, sourceKind, collectionID, collectionKind string, limit in
 			}
 			summary.Records++
 			return nil
+		}, func(warning string) {
+			summary.Warnings = append(summary.Warnings, warning)
 		}); err != nil {
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: %s", file, err))
 		}
@@ -970,7 +972,7 @@ func selectJSONRecords(root any, recordsPath string) ([]any, error) {
 	return nil, fmt.Errorf("records path %q did not resolve to an array", recordsPath)
 }
 
-func scanFile(path string, each func(ordinal int64, line []byte, obj map[string]any) error) error {
+func scanFile(path string, each func(ordinal int64, line []byte, obj map[string]any) error, warn func(string)) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -987,6 +989,9 @@ func scanFile(path string, each func(ordinal int64, line []byte, obj map[string]
 		}
 		var obj map[string]any
 		if err := json.Unmarshal(line, &obj); err != nil {
+			if warn != nil {
+				warn(fmt.Sprintf("%s:%d: invalid JSON: %s", path, ordinal, err))
+			}
 			continue
 		}
 		if err := each(ordinal, line, obj); err != nil {
