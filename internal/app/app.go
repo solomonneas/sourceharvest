@@ -441,7 +441,10 @@ func exportMarkdown(root, sourceKind, collectionID, collectionKind string, limit
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: %s", file, err))
 			continue
 		}
-		text := strings.TrimSpace(string(b))
+		// Front-matter, if present, is parsed out and stripped from the body so the
+		// item text is the prose only. A malformed block is treated as plain text.
+		front, body := parseFrontMatter(string(b))
+		text := strings.TrimSpace(body)
 		if text == "" {
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: empty markdown file", file))
 			continue
@@ -451,8 +454,14 @@ func exportMarkdown(root, sourceKind, collectionID, collectionKind string, limit
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: %s", file, err))
 			continue
 		}
+		createdAt := info.ModTime().UTC().Format(time.RFC3339Nano)
+		if front.Date != "" {
+			if parsed, ok := parseFrontMatterDate(front.Date); ok {
+				createdAt = parsed
+			}
+		}
 		hash := hashBytes(b)
-		rec := markdownRecord(file, text, hash, info.ModTime().UTC().Format(time.RFC3339Nano), sourceKind, collectionID, collectionKind)
+		rec := markdownRecord(file, text, hash, createdAt, sourceKind, collectionID, collectionKind, front)
 		if err := writeRecord(w, rec); err != nil {
 			return summary, err
 		}
@@ -863,9 +872,37 @@ func gitLogRecord(repo string, c gitCommit, sourceKind, collectionID, collection
 	}
 }
 
-func markdownRecord(path, text, hash, createdAt, sourceKind, collectionID, collectionKind string) adapter.Record {
-	title := markdownTitle(path, text)
+func markdownRecord(path, text, hash, createdAt, sourceKind, collectionID, collectionKind string, front frontMatter) adapter.Record {
+	// Front-matter title wins; otherwise fall back to the first heading or filename.
+	title := front.Title
+	if title == "" {
+		title = markdownTitle(path, text)
+	}
 	externalID := sourceKind + ":markdown:" + stableID(path, hash)
+
+	tags := []string{sourceKind, "markdown"}
+	tags = append(tags, front.Tags...)
+
+	// A front-matter author makes the note human-authored; otherwise it stays a
+	// system-derived note as before.
+	actor := &adapter.Actor{
+		ExternalID: sourceKind + ":system:markdown",
+		Type:       "system",
+		Name:       "Markdown",
+	}
+	if front.Author != "" {
+		actor = &adapter.Actor{
+			ExternalID: sourceKind + ":author:" + stableID(front.Author),
+			Type:       "human",
+			Name:       front.Author,
+		}
+	}
+
+	itemMeta := map[string]any{"source": sourceKind, "file_path": path, "title": title}
+	if len(front.Extra) > 0 {
+		itemMeta["front_matter"] = front.Extra
+	}
+
 	return adapter.Record{
 		Schema: adapter.SchemaV1,
 		Source: adapter.Source{Kind: sourceKind, Name: sourceKind},
@@ -880,14 +917,10 @@ func markdownRecord(path, text, hash, createdAt, sourceKind, collectionID, colle
 			Kind:       "note",
 			CreatedAt:  createdAt,
 			Text:       text,
-			Tags:       []string{sourceKind, "markdown"},
-			Metadata:   metadata(map[string]any{"source": sourceKind, "file_path": path, "title": title}),
+			Tags:       tags,
+			Metadata:   metadata(itemMeta),
 		},
-		Actor: &adapter.Actor{
-			ExternalID: sourceKind + ":system:markdown",
-			Type:       "system",
-			Name:       "Markdown",
-		},
+		Actor: actor,
 		Artifacts: []adapter.Artifact{{
 			ExternalID: stableID(externalID, path),
 			Kind:       "file",
@@ -914,6 +947,186 @@ func markdownTitle(path, text string) string {
 		}
 	}
 	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+}
+
+// frontMatter holds the well-known keys parsed from a leading YAML front-matter
+// block. Recognised keys are promoted to dedicated fields; any other scalar keys
+// land in Extra so they survive into item metadata.
+type frontMatter struct {
+	Title  string
+	Date   string
+	Author string
+	Tags   []string
+	Extra  map[string]string
+}
+
+// parseFrontMatter splits an optional leading `---` YAML front-matter block from
+// the markdown body. It uses a small line-based parser (no YAML dependency) that
+// understands `key: value` scalars and simple list values, either inline
+// (`[a, b]`) or as a block of `- item` lines. When no well-formed block is
+// present the whole input is returned unchanged as the body.
+func parseFrontMatter(raw string) (frontMatter, string) {
+	// Front matter must start at the very first line. Tolerate a leading BOM.
+	s := strings.TrimPrefix(raw, "\ufeff")
+	if !strings.HasPrefix(s, "---") {
+		return frontMatter{}, raw
+	}
+	// The opening fence is a line that is exactly "---".
+	lines := strings.Split(s, "\n")
+	if strings.TrimRight(lines[0], "\r") != "---" {
+		return frontMatter{}, raw
+	}
+	closeIdx := -1
+	for i := 1; i < len(lines); i++ {
+		trimmed := strings.TrimRight(lines[i], "\r")
+		if trimmed == "---" || trimmed == "..." {
+			closeIdx = i
+			break
+		}
+	}
+	if closeIdx == -1 {
+		// Unterminated front matter: treat the whole document as body (graceful
+		// fallback for malformed input rather than crashing).
+		return frontMatter{}, raw
+	}
+
+	fm := frontMatter{Extra: map[string]string{}}
+	block := lines[1:closeIdx]
+	var pendingKey string
+	var pendingList []string
+
+	flush := func() {
+		if pendingKey == "" {
+			return
+		}
+		assignFrontMatter(&fm, pendingKey, "", pendingList)
+		pendingKey = ""
+		pendingList = nil
+	}
+
+	for _, line := range block {
+		line = strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Continuation of a block list: "- item".
+		if pendingKey != "" && strings.HasPrefix(trimmed, "- ") {
+			item := unquoteScalar(strings.TrimSpace(trimmed[2:]))
+			if item != "" {
+				pendingList = append(pendingList, item)
+			}
+			continue
+		}
+		flush()
+		colon := strings.IndexByte(trimmed, ':')
+		if colon < 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:colon])
+		value := strings.TrimSpace(trimmed[colon+1:])
+		if key == "" {
+			continue
+		}
+		if value == "" {
+			// Likely a block list/scalar follows on subsequent lines.
+			pendingKey = key
+			continue
+		}
+		if items, ok := parseInlineList(value); ok {
+			assignFrontMatter(&fm, key, "", items)
+			continue
+		}
+		assignFrontMatter(&fm, key, unquoteScalar(value), nil)
+	}
+	flush()
+
+	body := strings.Join(lines[closeIdx+1:], "\n")
+	body = strings.TrimPrefix(body, "\n")
+	return fm, body
+}
+
+// assignFrontMatter routes a parsed key to a known field or to Extra.
+func assignFrontMatter(fm *frontMatter, key, scalar string, list []string) {
+	switch strings.ToLower(key) {
+	case "title":
+		fm.Title = scalar
+	case "date", "created", "created_at":
+		if fm.Date == "" {
+			fm.Date = scalar
+		}
+	case "author", "authors":
+		if scalar != "" {
+			fm.Author = scalar
+		} else if len(list) > 0 {
+			fm.Author = list[0]
+		}
+	case "tags", "keywords":
+		if len(list) > 0 {
+			fm.Tags = append(fm.Tags, list...)
+		} else if scalar != "" {
+			fm.Tags = append(fm.Tags, scalar)
+		}
+	default:
+		if scalar != "" {
+			fm.Extra[key] = scalar
+		} else if len(list) > 0 {
+			fm.Extra[key] = strings.Join(list, ", ")
+		}
+	}
+}
+
+// parseInlineList parses a flow-style list `[a, b, c]`. It returns ok=false when
+// the value is not bracketed.
+func parseInlineList(value string) ([]string, bool) {
+	if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
+		return nil, false
+	}
+	inner := strings.TrimSpace(value[1 : len(value)-1])
+	if inner == "" {
+		return []string{}, true
+	}
+	var out []string
+	for _, part := range strings.Split(inner, ",") {
+		item := unquoteScalar(strings.TrimSpace(part))
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out, true
+}
+
+// unquoteScalar strips a single matching pair of surrounding quotes.
+func unquoteScalar(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// parseFrontMatterDate normalizes a front-matter date into RFC3339Nano UTC. It
+// accepts a handful of common layouts and returns ok=false when none parse, so
+// the caller can fall back to file mtime.
+func parseFrontMatterDate(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"2006/01/02",
+		"01/02/2006",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t.UTC().Format(time.RFC3339Nano), true
+		}
+	}
+	return "", false
 }
 
 func normalize(path string, ordinal int64, line []byte, obj map[string]any, sourceKind, collectionID, collectionKind string) (adapter.Record, string) {

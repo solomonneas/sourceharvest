@@ -8,7 +8,7 @@ It does not crawl live services.
 
 - `jsonl` reader: one normalized record per JSON line, with bad lines warned and skipped.
 - `json` reader: select a records array by dot path, or a single root object.
-- `markdown` reader: one note record per file, title from the first heading.
+- `markdown` reader: one note record per file; optional YAML front-matter supplies title, date (used for `created_at`), tags, and author, with the body stripped of the front-matter block; otherwise the title falls back to the first heading.
 - `files` reader: plain text files, filtered by `--glob`.
 - `html` reader: local page snapshots with scripts, styles, and tags stripped, entities decoded, and title resolved from `<title>` or the file name.
 - `gitlog` reader: one event record per commit, including the commit body and changed-file list; author email lands on the actor metadata; a repo with no commits yet emits zero records instead of failing.

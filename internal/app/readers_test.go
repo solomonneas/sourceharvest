@@ -196,6 +196,124 @@ func TestMarkdownReaderHappyPath(t *testing.T) {
 	}
 }
 
+func TestMarkdownReaderParsesFrontMatter(t *testing.T) {
+	dir := t.TempDir()
+	doc := "---\n" +
+		"title: Quarterly Notes\n" +
+		"date: 2023-04-15\n" +
+		"author: Jane Author\n" +
+		"tags: [planning, ops]\n" +
+		"status: draft\n" +
+		"---\n" +
+		"# Heading\n\nBody prose goes here.\n"
+	if err := os.WriteFile(filepath.Join(dir, "note.md"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := runReader(t, "markdown", dir,
+		"--source", "notes", "--collection", "notes:local", "--out", "-", "--json")
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	assertValidRecords(t, recs, "notes", "notes:local")
+	rec := recs[0]
+
+	// front matter is stripped from the body text.
+	if strings.Contains(rec.Item.Text, "title:") || strings.Contains(rec.Item.Text, "---") {
+		t.Fatalf("front matter leaked into text: %q", rec.Item.Text)
+	}
+	if !strings.Contains(rec.Item.Text, "Body prose goes here.") {
+		t.Fatalf("body missing: %q", rec.Item.Text)
+	}
+
+	// title from front matter, not the heading.
+	var meta map[string]any
+	if err := json.Unmarshal(rec.Item.Metadata, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta["title"] != "Quarterly Notes" {
+		t.Fatalf("title = %v, want front-matter title", meta["title"])
+	}
+	// unknown scalar keys survive in front_matter metadata.
+	fm, ok := meta["front_matter"].(map[string]any)
+	if !ok || fm["status"] != "draft" {
+		t.Fatalf("front_matter metadata wrong: %v", meta["front_matter"])
+	}
+
+	// date drives created_at.
+	if !strings.HasPrefix(rec.Item.CreatedAt, "2023-04-15") {
+		t.Fatalf("created_at = %q, want front-matter date", rec.Item.CreatedAt)
+	}
+
+	// tags include front-matter tags alongside the defaults.
+	tagset := map[string]bool{}
+	for _, tag := range rec.Item.Tags {
+		tagset[tag] = true
+	}
+	if !tagset["planning"] || !tagset["ops"] || !tagset["markdown"] {
+		t.Fatalf("tags = %v, want planning+ops+markdown", rec.Item.Tags)
+	}
+
+	// author becomes a human actor.
+	if rec.Actor == nil || rec.Actor.Type != "human" || rec.Actor.Name != "Jane Author" {
+		t.Fatalf("actor = %#v, want human Jane Author", rec.Actor)
+	}
+}
+
+func TestMarkdownReaderWithoutFrontMatterUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.md"), []byte("# Plain Heading\n\nplain body\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := runReader(t, "markdown", dir,
+		"--source", "notes", "--collection", "notes:local", "--out", "-", "--json")
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	var meta map[string]any
+	if err := json.Unmarshal(rec.Item.Metadata, &meta); err != nil {
+		t.Fatal(err)
+	}
+	// title falls back to the first heading.
+	if meta["title"] != "Plain Heading" {
+		t.Fatalf("title = %v, want heading", meta["title"])
+	}
+	if _, ok := meta["front_matter"]; ok {
+		t.Fatalf("front_matter metadata should be absent: %v", meta["front_matter"])
+	}
+	// no author -> system actor (existing behavior preserved).
+	if rec.Actor == nil || rec.Actor.Type != "system" {
+		t.Fatalf("actor = %#v, want system actor", rec.Actor)
+	}
+}
+
+func TestMarkdownReaderMalformedFrontMatterFallsBack(t *testing.T) {
+	dir := t.TempDir()
+	// opening fence with no closing fence: must not crash and must keep content.
+	doc := "---\ntitle: Broken\nno closing fence here\n\n# Heading\n\nthe body\n"
+	if err := os.WriteFile(filepath.Join(dir, "note.md"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, summary := runReader(t, "markdown", dir,
+		"--source", "notes", "--collection", "notes:local", "--out", "-", "--json")
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1 (summary=%#v)", len(recs), summary)
+	}
+	assertValidRecords(t, recs, "notes", "notes:local")
+	rec := recs[0]
+	// With no closing fence the whole document is the body (current behavior).
+	if !strings.Contains(rec.Item.Text, "the body") || !strings.Contains(rec.Item.Text, "title: Broken") {
+		t.Fatalf("malformed front matter should remain in body: %q", rec.Item.Text)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(rec.Item.Metadata, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := meta["front_matter"]; ok {
+		t.Fatalf("malformed front matter should not populate metadata: %v", meta["front_matter"])
+	}
+}
+
 func TestMarkdownReaderEmptyFileWarns(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "empty.md"), []byte("   \n\n"), 0o600); err != nil {

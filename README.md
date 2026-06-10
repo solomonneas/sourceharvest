@@ -188,7 +188,7 @@ Each reader turns one local input shape into `miseledger.adapter.v1` records.
 | --- | --- | --- |
 | `jsonl` | line-oriented JSON files | One record per JSON line; bad lines warn and are skipped. |
 | `json` | nested JSON document | Select a records array by `--records-path` (or a single root object). |
-| `markdown` | `.md` / `.markdown` files | One note record per file; title comes from the first heading. |
+| `markdown` | `.md` / `.markdown` files | One note record per file; optional YAML front-matter sets title, date, tags, and author, otherwise title comes from the first heading. |
 | `files` | plain text files | One file record per match; filter by `--glob`. |
 | `html` | `.html` / `.htm` files | Strips scripts, styles, and tags; title from `<title>` or file name. |
 | `gitlog` | a local git repo | One event record per commit (subject + body in text, author email on the actor, changed files as `file` artifacts); an empty repo emits zero records. |
