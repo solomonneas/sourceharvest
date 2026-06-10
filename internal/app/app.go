@@ -525,12 +525,23 @@ func exportGitLog(repo, sourceKind, collectionID, collectionKind string, limit i
 		limit = 200
 	}
 	cmd := exec.Command("git", "-C", repo, "log", "--date=iso-strict", "--format=%H%x1f%aI%x1f%an%x1f%s", "-n", fmt.Sprint(limit))
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
 	b, err := cmd.Output()
+	summary := Summary{Source: sourceKind, Path: repo, Files: 1, Warnings: []string{}, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if err != nil {
+		// A valid repository with no commits yet is a reasonable empty input:
+		// emit zero records with a warning rather than a cryptic exit-128 error.
+		if isEmptyGitRepo(stderrBuf.String()) {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s: repository has no commits yet", repo))
+			return summary, nil
+		}
+		if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
+			return Summary{}, fmt.Errorf("%s: %s", err, msg)
+		}
 		return Summary{}, err
 	}
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	summary := Summary{Source: sourceKind, Path: repo, Files: 1, Warnings: []string{}, GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	for i, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -547,6 +558,15 @@ func exportGitLog(repo, sourceKind, collectionID, collectionKind string, limit i
 		summary.Records++
 	}
 	return summary, nil
+}
+
+// isEmptyGitRepo reports whether git log failed because the repository exists
+// but has no commits yet. It deliberately does not match "not a git repository"
+// or other genuine errors, which should still surface as failures.
+func isEmptyGitRepo(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "does not have any commits yet") ||
+		strings.Contains(s, "bad default revision 'head'")
 }
 
 func exportJSON(path, sourceKind, collectionID, collectionKind, recordsPath string, limit int, w io.Writer) (Summary, error) {
