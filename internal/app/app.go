@@ -120,7 +120,7 @@ func runFiles(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	globs := opts.FlagSet.String("glob", "*.txt,*.md,*.markdown", "comma-separated filename globs")
-	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+	if err := opts.Parse(); err != nil {
 		return err
 	}
 	if err := opts.Validate("sourceharvest files <path-or-dir> --source KIND --collection ID --out <file|->"); err != nil {
@@ -136,7 +136,7 @@ func runHTML(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+	if err := opts.Parse(); err != nil {
 		return err
 	}
 	if err := opts.Validate("sourceharvest html <path-or-dir> --source KIND --collection ID --out <file|->"); err != nil {
@@ -152,7 +152,7 @@ func runGitLog(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+	if err := opts.Parse(); err != nil {
 		return err
 	}
 	if err := opts.Validate("sourceharvest gitlog <repo> --source KIND --collection ID --out <file|->"); err != nil {
@@ -169,7 +169,7 @@ func runJSON(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	recordsPath := opts.FlagSet.String("records-path", "", "dot path to an array of records")
-	if err := opts.FlagSet.Parse(opts.FlagArgs); err != nil {
+	if err := opts.Parse(); err != nil {
 		return err
 	}
 	if err := opts.Validate("sourceharvest json <file> --source KIND --collection ID --records-path PATH --out <file|->"); err != nil {
@@ -181,9 +181,19 @@ func runJSON(args []string, stdout, stderr io.Writer) error {
 }
 
 type commonExportOptions struct {
-	Path           string
-	FlagArgs       []string
-	FlagSet        *flag.FlagSet
+	Path     string
+	FlagArgs []string
+	FlagSet  *flag.FlagSet
+
+	// Flag pointers are read after FlagSet.Parse runs, not before, so the values
+	// reflect what the user actually passed.
+	sourceKind     *string
+	collectionID   *string
+	collectionKind *string
+	outPath        *string
+	limit          *int
+	jsonSummary    *bool
+
 	SourceKind     string
 	CollectionID   string
 	CollectionKind string
@@ -195,28 +205,38 @@ type commonExportOptions struct {
 func parseCommonExport(name string, args []string, stderr io.Writer, defaultCollectionKind string) (commonExportOptions, error) {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	sourceKind := fs.String("source", "", "source kind")
-	collectionID := fs.String("collection", "", "collection external ID")
-	collectionKind := fs.String("collection-kind", defaultCollectionKind, "collection kind")
-	outPath := fs.String("out", "-", "output file or - for stdout")
-	limit := fs.Int("limit", 0, "maximum records to emit")
-	jsonSummary := fs.Bool("json", false, "write summary JSON after export")
+	opts := commonExportOptions{FlagSet: fs}
+	opts.sourceKind = fs.String("source", "", "source kind")
+	opts.collectionID = fs.String("collection", "", "collection external ID")
+	opts.collectionKind = fs.String("collection-kind", defaultCollectionKind, "collection kind")
+	opts.outPath = fs.String("out", "-", "output file or - for stdout")
+	opts.limit = fs.Int("limit", 0, "maximum records to emit")
+	opts.jsonSummary = fs.Bool("json", false, "write summary JSON after export")
 	path, flagArgs, err := splitPathAndFlags(args)
 	if err != nil {
 		return commonExportOptions{}, err
 	}
-	return commonExportOptions{Path: path, FlagArgs: flagArgs, FlagSet: fs, SourceKind: *sourceKind, CollectionID: *collectionID, CollectionKind: *collectionKind, OutPath: *outPath, Limit: *limit, JSONSummary: *jsonSummary}, nil
+	opts.Path = path
+	opts.FlagArgs = flagArgs
+	return opts, nil
 }
 
+// Parse parses the collected flag arguments. Because --limit is an int flag,
+// FlagSet.Parse surfaces an invalid value as an error here instead of it being
+// silently swallowed downstream.
+func (o *commonExportOptions) Parse() error {
+	return o.FlagSet.Parse(o.FlagArgs)
+}
+
+// Validate reads the parsed flag values into the struct and checks them. It must
+// be called after Parse.
 func (o *commonExportOptions) Validate(usage string) error {
-	o.SourceKind = strings.TrimSpace(o.FlagSet.Lookup("source").Value.String())
-	o.CollectionID = strings.TrimSpace(o.FlagSet.Lookup("collection").Value.String())
-	o.CollectionKind = strings.TrimSpace(o.FlagSet.Lookup("collection-kind").Value.String())
-	o.OutPath = o.FlagSet.Lookup("out").Value.String()
-	o.JSONSummary = o.FlagSet.Lookup("json").Value.String() == "true"
-	if _, err := fmt.Sscan(o.FlagSet.Lookup("limit").Value.String(), &o.Limit); err != nil {
-		o.Limit = 0
-	}
+	o.SourceKind = strings.TrimSpace(*o.sourceKind)
+	o.CollectionID = strings.TrimSpace(*o.collectionID)
+	o.CollectionKind = strings.TrimSpace(*o.collectionKind)
+	o.OutPath = *o.outPath
+	o.JSONSummary = *o.jsonSummary
+	o.Limit = *o.limit
 	if o.Path == "" || len(o.FlagSet.Args()) != 0 {
 		return errors.New("usage: " + usage)
 	}

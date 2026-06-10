@@ -687,6 +687,31 @@ func TestGitLogReaderRespectsLimit(t *testing.T) {
 	}
 }
 
+func TestInvalidLimitSurfacesError(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "dev@example.invalid")
+	runGit(t, dir, "config", "user.name", "Dev")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"gitlog", dir, "--source", "gitlog", "--collection", "repo:test",
+		"--limit", "not-a-number", "--out", "-"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("invalid --limit should fail, got success: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "limit") {
+		t.Fatalf("error should mention the limit flag, got: %s", stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("invalid --limit should emit no records, got: %s", stdout.String())
+	}
+}
+
 func TestGitLogReaderEmptyRepoIsGraceful(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
