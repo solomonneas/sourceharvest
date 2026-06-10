@@ -238,3 +238,16 @@ func runGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
+
+// gitCurrentBranch returns the name of the currently checked-out branch, which
+// varies (main vs master) with the host git's init.defaultBranch setting.
+func gitCurrentBranch(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse failed: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}

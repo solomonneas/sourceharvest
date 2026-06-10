@@ -402,12 +402,151 @@ func TestGitLogReaderRealisticHistory(t *testing.T) {
 	if first.Raw.Ordinal == nil {
 		t.Fatalf("gitlog raw ordinal missing: %#v", first.Raw)
 	}
-	// each commit carries a repo artifact and the commit hash in metadata.
-	if len(first.Artifacts) != 1 || first.Artifacts[0].Kind != "repo" {
+	// each commit carries a repo artifact (plus one file artifact per changed
+	// file) and the commit hash in metadata.
+	if first.Artifacts[0].Kind != "repo" {
+		t.Fatalf("first artifact should be the repo: %#v", first.Artifacts)
+	}
+	var sawRepo bool
+	for _, a := range first.Artifacts {
+		if a.Kind == "repo" {
+			sawRepo = true
+		}
+	}
+	if !sawRepo {
 		t.Fatalf("repo artifact missing: %#v", first.Artifacts)
 	}
 	if summary.Records != 2 || len(summary.Warnings) != 0 {
 		t.Fatalf("bad summary: %#v", summary)
+	}
+}
+
+func TestGitLogReaderCapturesBodyEmailAndFiles(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "jane@maintainer.invalid")
+	runGit(t, dir, "config", "user.name", "Jane Maintainer")
+	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("beta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "feat: add alpha and beta", "-m", "This is the body.\n\nWith a second paragraph and | pipe.")
+
+	recs, summary := runReader(t, "gitlog", dir,
+		"--source", "gitlog", "--collection", "repo:test", "--out", "-", "--json")
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	if summary.Records != 1 || len(summary.Warnings) != 0 {
+		t.Fatalf("bad summary: %#v", summary)
+	}
+	assertValidRecords(t, recs, "gitlog", "repo:test")
+	rec := recs[0]
+
+	if !strings.Contains(rec.Item.Text, "feat: add alpha and beta") {
+		t.Fatalf("subject missing from text: %q", rec.Item.Text)
+	}
+	if !strings.Contains(rec.Item.Text, "second paragraph and | pipe") {
+		t.Fatalf("body missing from text: %q", rec.Item.Text)
+	}
+
+	// author email lands on the actor metadata.
+	if rec.Actor == nil {
+		t.Fatalf("actor missing")
+	}
+	var actorMeta map[string]any
+	if err := json.Unmarshal(rec.Actor.Metadata, &actorMeta); err != nil {
+		t.Fatalf("actor metadata: %v", err)
+	}
+	if actorMeta["email"] != "jane@maintainer.invalid" {
+		t.Fatalf("author email = %v, want jane@maintainer.invalid", actorMeta["email"])
+	}
+
+	// item metadata carries the body and the changed-file list.
+	var itemMeta map[string]any
+	if err := json.Unmarshal(rec.Item.Metadata, &itemMeta); err != nil {
+		t.Fatalf("item metadata: %v", err)
+	}
+	if body, _ := itemMeta["body"].(string); !strings.Contains(body, "second paragraph") {
+		t.Fatalf("item metadata body wrong: %v", itemMeta["body"])
+	}
+	cf, ok := itemMeta["changed_files"].([]any)
+	if !ok || len(cf) != 2 {
+		t.Fatalf("changed_files = %v, want 2 entries", itemMeta["changed_files"])
+	}
+
+	// changed files also appear as "file" artifacts (plus the repo artifact).
+	var fileArtifacts []adapter.Artifact
+	var sawRepo bool
+	paths := map[string]bool{}
+	for _, a := range rec.Artifacts {
+		switch a.Kind {
+		case "repo":
+			sawRepo = true
+		case "file":
+			fileArtifacts = append(fileArtifacts, a)
+			paths[a.Path] = true
+		}
+	}
+	if !sawRepo {
+		t.Fatalf("repo artifact missing: %#v", rec.Artifacts)
+	}
+	if len(fileArtifacts) != 2 || !paths["alpha.txt"] || !paths["beta.txt"] {
+		t.Fatalf("file artifacts wrong: %#v", fileArtifacts)
+	}
+}
+
+func TestGitLogReaderHandlesEmptyBodyAndMerge(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "dev@example.invalid")
+	runGit(t, dir, "config", "user.name", "Dev")
+	// root commit with no body.
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "chore: base")
+	defaultBranch := gitCurrentBranch(t, dir)
+	// create a branch, diverge, and merge to produce a merge commit.
+	runGit(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "feat: feature work")
+	runGit(t, dir, "checkout", defaultBranch)
+	if err := os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "feat: main work")
+	runGit(t, dir, "merge", "--no-ff", "feature", "-m", "Merge feature")
+
+	recs, summary := runReader(t, "gitlog", dir,
+		"--source", "gitlog", "--collection", "repo:test", "--out", "-", "--json")
+	if len(recs) == 0 {
+		t.Fatalf("expected commits, got none")
+	}
+	assertValidRecords(t, recs, "gitlog", "repo:test")
+	if len(summary.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", summary.Warnings)
+	}
+	// the base commit had no body; its text should equal its subject.
+	var base *adapter.Record
+	for i := range recs {
+		if strings.Contains(recs[i].Item.Text, "chore: base") {
+			base = &recs[i]
+		}
+	}
+	if base == nil {
+		t.Fatalf("base commit not found in %d records", len(recs))
+	}
+	if strings.TrimSpace(base.Item.Text) != "chore: base" {
+		t.Fatalf("empty-body commit text = %q, want just the subject", base.Item.Text)
 	}
 }
 

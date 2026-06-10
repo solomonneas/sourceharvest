@@ -191,7 +191,7 @@ Each reader turns one local input shape into `miseledger.adapter.v1` records.
 | `markdown` | `.md` / `.markdown` files | One note record per file; title comes from the first heading. |
 | `files` | plain text files | One file record per match; filter by `--glob`. |
 | `html` | `.html` / `.htm` files | Strips scripts, styles, and tags; title from `<title>` or file name. |
-| `gitlog` | a local git repo | One event record per commit; an empty repo emits zero records. |
+| `gitlog` | a local git repo | One event record per commit (subject + body in text, author email on the actor, changed files as `file` artifacts); an empty repo emits zero records. |
 
 ## Usage
 

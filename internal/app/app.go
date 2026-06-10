@@ -520,11 +520,35 @@ func exportTextFiles(root string, files []string, sourceKind, collectionID, coll
 	return summary, nil
 }
 
+// gitCommit holds the parsed fields of a single commit emitted by git log.
+type gitCommit struct {
+	Hash         string
+	CreatedAt    string
+	AuthorName   string
+	AuthorEmail  string
+	Subject      string
+	Body         string
+	ChangedFiles []gitChangedFile
+}
+
+// gitChangedFile records a path touched by a commit and the git status letter
+// (A/M/D/R...) reported by --name-status.
+type gitChangedFile struct {
+	Status string `json:"status"`
+	Path   string `json:"path"`
+}
+
 func exportGitLog(repo, sourceKind, collectionID, collectionKind string, limit int, w io.Writer) (Summary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	cmd := exec.Command("git", "-C", repo, "log", "--date=iso-strict", "--format=%H%x1f%aI%x1f%an%x1f%s", "-n", fmt.Sprint(limit))
+	// Field delimiter \x1f separates the metadata fields; record delimiter \x1e
+	// separates commits. Using delimiters that cannot appear in commit text lets
+	// multi-line bodies (%b) survive intact. --name-status appends one line per
+	// changed file after each formatted record.
+	const format = "%H%x1f%aI%x1f%an%x1f%ae%x1f%s%x1f%b%x1e"
+	cmd := exec.Command("git", "-C", repo, "log", "--date=iso-strict",
+		"--no-color", "--name-status", "-M", "--format="+format, "-n", fmt.Sprint(limit))
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 	b, err := cmd.Output()
@@ -541,23 +565,123 @@ func exportGitLog(repo, sourceKind, collectionID, collectionKind string, limit i
 		}
 		return Summary{}, err
 	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "" {
+	// git emits, per commit: the six \x1f-delimited fields (the last being the
+	// multi-line body), then the \x1e record delimiter, then a blank line, then
+	// the --name-status lines. Splitting on \x1e therefore yields segments where
+	// every segment after the first BEGINS with the previous commit's name-status
+	// block, followed by the next commit's fields. The final segment is only the
+	// last commit's name-status block.
+	segments := strings.Split(string(b), "\x1e")
+	var commits []gitCommit
+	for i, seg := range segments {
+		statusBlock, fieldsPart := splitLeadingStatus(seg)
+		// Attach this segment's leading name-status block to the previous commit.
+		if i > 0 && len(commits) > 0 {
+			commits[len(commits)-1].ChangedFiles = parseNameStatus(statusBlock)
+		}
+		if strings.TrimSpace(fieldsPart) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x1f", 4)
-		if len(parts) != 4 {
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf("git log line %d: malformed", i+1))
+		commit, ok := parseGitCommit(fieldsPart)
+		if !ok {
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("git log record %d: malformed", i+1))
 			continue
 		}
-		rec := gitLogRecord(repo, parts[0], parts[1], parts[2], parts[3], sourceKind, collectionID, collectionKind, int64(i+1))
+		commits = append(commits, commit)
+	}
+	for i, commit := range commits {
+		rec := gitLogRecord(repo, commit, sourceKind, collectionID, collectionKind, int64(i+1))
 		if err := writeRecord(w, rec); err != nil {
 			return summary, err
 		}
 		summary.Records++
 	}
 	return summary, nil
+}
+
+// splitLeadingStatus separates the leading run of name-status lines (the changed
+// files of the preceding commit) from the remainder of a segment. The remainder
+// holds the next commit's \x1f-delimited fields, if any.
+func splitLeadingStatus(seg string) (status, fields string) {
+	seg = strings.TrimLeft(seg, "\n")
+	lines := strings.Split(seg, "\n")
+	cut := 0
+	for cut < len(lines) {
+		if strings.TrimSpace(lines[cut]) == "" {
+			cut++
+			continue
+		}
+		if isNameStatusLine(lines[cut]) {
+			cut++
+			continue
+		}
+		break
+	}
+	status = strings.Join(lines[:cut], "\n")
+	fields = strings.Join(lines[cut:], "\n")
+	return status, fields
+}
+
+// parseGitCommit parses the six \x1f-delimited fields of a single commit. The
+// last field is the body, which may contain newlines. It returns ok=false when
+// the field count is wrong.
+func parseGitCommit(raw string) (gitCommit, bool) {
+	fields := strings.SplitN(raw, "\x1f", 6)
+	if len(fields) != 6 {
+		return gitCommit{}, false
+	}
+	return gitCommit{
+		Hash:        strings.TrimSpace(fields[0]),
+		CreatedAt:   strings.TrimSpace(fields[1]),
+		AuthorName:  fields[2],
+		AuthorEmail: strings.TrimSpace(fields[3]),
+		Subject:     fields[4],
+		Body:        strings.TrimRight(fields[5], "\n"),
+	}, true
+}
+
+func isNameStatusLine(line string) bool {
+	tab := strings.IndexByte(line, '\t')
+	if tab <= 0 {
+		return false
+	}
+	status := line[:tab]
+	if status == "" {
+		return false
+	}
+	switch status[0] {
+	case 'A', 'M', 'D', 'R', 'C', 'T', 'U', 'X', 'B':
+		// allow a trailing similarity score, e.g. R100 or C75.
+		for _, r := range status[1:] {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// parseNameStatus parses the changed-file lines produced by git log
+// --name-status. Renames/copies (R/C) carry two tab-separated paths; the new
+// path is used.
+func parseNameStatus(block string) []gitChangedFile {
+	var files []gitChangedFile
+	for _, line := range strings.Split(block, "\n") {
+		if !isNameStatusLine(line) {
+			continue
+		}
+		cols := strings.Split(line, "\t")
+		status := cols[0]
+		path := cols[len(cols)-1]
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		files = append(files, gitChangedFile{Status: status, Path: path})
+	}
+	return files
 }
 
 // isEmptyGitRepo reports whether git log failed because the repository exists
@@ -644,10 +768,66 @@ func fileRecord(path, text, title, hash, createdAt, sourceKind, collectionID, co
 	}
 }
 
-func gitLogRecord(repo, commit, createdAt, author, subject, sourceKind, collectionID, collectionKind string, ordinal int64) adapter.Record {
-	line := []byte(commit + "\x1f" + createdAt + "\x1f" + author + "\x1f" + subject)
-	externalID := sourceKind + ":commit:" + commit
+func gitLogRecord(repo string, c gitCommit, sourceKind, collectionID, collectionKind string, ordinal int64) adapter.Record {
+	// The raw hash covers the full reconstructed record so it remains stable and
+	// distinct per commit even though the record now carries more than the subject.
+	line := []byte(c.Hash + "\x1f" + c.CreatedAt + "\x1f" + c.AuthorName + "\x1f" + c.AuthorEmail + "\x1f" + c.Subject + "\x1f" + c.Body)
+	externalID := sourceKind + ":commit:" + c.Hash
 	ordinalCopy := ordinal
+
+	// item.text is the subject plus the body so downstream search sees the full
+	// commit message, not just the first line.
+	text := c.Subject
+	if c.Body != "" {
+		text = c.Subject + "\n\n" + c.Body
+	}
+
+	changedPaths := make([]string, 0, len(c.ChangedFiles))
+	for _, f := range c.ChangedFiles {
+		changedPaths = append(changedPaths, f.Path)
+	}
+
+	itemMeta := map[string]any{"repo": repo, "commit": c.Hash}
+	if c.Body != "" {
+		itemMeta["body"] = c.Body
+	}
+	if len(c.ChangedFiles) > 0 {
+		itemMeta["changed_files"] = c.ChangedFiles
+	}
+
+	// The author email becomes part of the actor identity (and metadata) so the
+	// same person resolves consistently across name spelling changes.
+	actorMeta := map[string]any{}
+	if c.AuthorEmail != "" {
+		actorMeta["email"] = c.AuthorEmail
+	}
+	actorKey := c.AuthorEmail
+	if actorKey == "" {
+		actorKey = c.AuthorName
+	}
+
+	artifacts := []adapter.Artifact{{
+		ExternalID: stableID(externalID, repo),
+		Kind:       "repo",
+		Path:       repo,
+		Metadata:   metadata(map[string]any{"commit": c.Hash}),
+	}}
+	// Each changed file becomes a "file" artifact so consumers can index touched
+	// paths without re-parsing the commit body.
+	for _, f := range c.ChangedFiles {
+		artifacts = append(artifacts, adapter.Artifact{
+			ExternalID: stableID(externalID, f.Path),
+			Kind:       "file",
+			Path:       f.Path,
+			Metadata:   metadata(map[string]any{"commit": c.Hash, "status": f.Status}),
+		})
+	}
+
+	var actorMetaJSON json.RawMessage
+	if len(actorMeta) > 0 {
+		actorMetaJSON = metadata(actorMeta)
+	}
+
 	return adapter.Record{
 		Schema: adapter.SchemaV1,
 		Source: adapter.Source{Kind: sourceKind, Name: sourceKind},
@@ -660,22 +840,18 @@ func gitLogRecord(repo, commit, createdAt, author, subject, sourceKind, collecti
 		Item: adapter.Item{
 			ExternalID: externalID,
 			Kind:       "event",
-			CreatedAt:  createdAt,
-			Text:       subject,
+			CreatedAt:  c.CreatedAt,
+			Text:       text,
 			Tags:       []string{sourceKind, "gitlog"},
-			Metadata:   metadata(map[string]any{"repo": repo, "commit": commit}),
+			Metadata:   metadata(itemMeta),
 		},
 		Actor: &adapter.Actor{
-			ExternalID: sourceKind + ":author:" + stableID(author),
+			ExternalID: sourceKind + ":author:" + stableID(actorKey),
 			Type:       "human",
-			Name:       author,
+			Name:       c.AuthorName,
+			Metadata:   actorMetaJSON,
 		},
-		Artifacts: []adapter.Artifact{{
-			ExternalID: stableID(externalID, repo),
-			Kind:       "repo",
-			Path:       repo,
-			Metadata:   metadata(map[string]any{"commit": commit}),
-		}},
+		Artifacts: artifacts,
 		Links:     []adapter.Link{},
 		Relations: []adapter.Relation{},
 		Raw: adapter.RawRef{
