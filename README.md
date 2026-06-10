@@ -1,5 +1,12 @@
 # SourceHarvest
 
+<p>
+  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/sourceharvest/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status">
+  <img src="https://img.shields.io/github/v/release/escoffier-labs/sourceharvest?style=for-the-badge&label=release" alt="Latest release">
+  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
+</p>
+
 SourceHarvest exports source-system records to `miseledger.adapter.v1` JSONL.
 
 It is the sibling tool to StationTrail:
@@ -172,6 +179,19 @@ curl -fsSL https://raw.githubusercontent.com/escoffier-labs/sourceharvest/master
 ```
 
 Or download a release binary and verify it with `checksums.txt`.
+
+## Readers
+
+Each reader turns one local input shape into `miseledger.adapter.v1` records.
+
+| Reader | Input | One-liner |
+| --- | --- | --- |
+| `jsonl` | line-oriented JSON files | One record per JSON line; bad lines warn and are skipped. |
+| `json` | nested JSON document | Select a records array by `--records-path` (or a single root object). |
+| `markdown` | `.md` / `.markdown` files | One note record per file; title comes from the first heading. |
+| `files` | plain text files | One file record per match; filter by `--glob`. |
+| `html` | `.html` / `.htm` files | Strips scripts, styles, and tags; title from `<title>` or file name. |
+| `gitlog` | a local git repo | One event record per commit; an empty repo emits zero records. |
 
 ## Usage
 
